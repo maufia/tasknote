@@ -2,9 +2,16 @@
 
 ###############################################################################
 # tasknote - associate note file with individual tasks in taskwarrior
-# 
+#
 # Copyright 2011, Alan Bowen, bowen@tcnj.edu.
 # All rights reserved.
+#
+# Copyright 2012, Scott Kostyshak, skostysh@princeton.edu.
+# (fixed some bugs, made compatible with Taskwarrior 2.2.0, and added
+# error handling)
+#
+# Copyright 2014, Mauro Fiacco, mfiac@fiacco.org.
+# (added template and headers, updated when the note is edited) 
 #
 # based on taskopen - file based notes with taskwarrior
 #
@@ -32,19 +39,34 @@
 #
 ###############################################################################
 
-# Updated 2012, Michael Bobroski <bobroski@gmail.com>
-# 	- Updated to work with Taskwarrior 2.0
-# 	- View Note Feature
-#	- Allow relative path for FOLDER
+# Updated by Mauro Fiacco on 6 April 2014
+# Tested with TaskWarrior 2.3.0
+# Change log:
+# - Added tasknote template. Used for all new tasks 
+# - If USEHEADER is true, the template is provided with headers
+#   with tasks info entries (Description, Project, Tags)
+#   Headers are updated every time the note is opened
+#   (Note that the template limits the editor to vi/vim
+# - Copied from AlexCzar's tasknote branch, the [tasknote] flag 
+#   in the note file is used as annotation. This is update when changed
 
-EDITOR=vim
+# Updated by Scott Kostyshak on 27 November 2012.
+# Tested with Taskwarrior 2.2.0.
+# Changelog:
+# - Use the 'uuid' command to get UUIDs instead of parsing.
+# - Test return of UUIDs and give an error if something is off.
+# - Folder no longer needs to have a slash at the end.
+# - Error given if tasknote folder does not exist.
+# - Unify whitespace and comment style.
+
+EDITOR="vim -c \"set nowrap\"" 
 TASKBIN=task
-VIEWER=cat
 
-# FOLDER to store notes in. Must already exist.
-# If you sync tasks, FOLDER should be a location that syncs and is available to
-# other computers, i.e. ~/dropbox/tasknotes
-FOLDER="~/Dropbox/tasks/notes/"
+# If you sync tasks FOLDER should be a location that syncs and is available to
+# other computers, i.e. /users/dropbox/tasknotes
+# FOLDER to store notes in, must already exist!
+#FOLDER="/users/dropbox/taskwarrior/tasknotes/"
+FOLDER="$HOME/.task/tasknotes"
 
 # Check for existence of $FOLDER
 if [ ! -d $FOLDER ]; then
@@ -63,52 +85,122 @@ fi
 # Preferred extension for tasknotes
 EXT=".txt"
 
-# Message that gets annotated to the task to indicate that notes exist
-NOTEMSG="See Notes File"
+# Template used when creating new notes.
+TEMPLATE="[tasknote] This string will appear as annotation
+
+TO DO:
+------
+
+
+STATUS:
+-------
+
+"
+
+# Use task info headers (true/false)
+USEHEADER="true"
+
+# Use the separator between header and tasknote conent
+# Only used if header is in use
+SEPARATOR="~~~~~~~~~~ DO NOT EDIT ABOVE THIS LINE ~~~~~~~~~~"
+
+# Set the cursor afer the header
+EDITORPOS=" -c \"call cursor(1,12)\""
+if [ "$USEHEADER" == "true" ]; then 
+	EDITORPOS=" -c \"call cursor(5,12)\""
+fi
 
 # Display usage if task number not supplied on cli
-if [ $# -lt 1 -o $# -gt 2 ]; then
-	echo "Usage:"
-   	echo "  New/Edit note: $0 <id>"
-	echo "  View note:     $0 <id> v"
-	exit 1
+if [ $# != 1 ]; then
+  echo "Usage: $0 <id>" 1>&2
+  exit 2
 fi
 
-#find UUID from given task
-uuid=`$TASKBIN $1 uuids`
+# Find UUID from given task
+uuid=$( $TASKBIN rc._forcecolor=no rc.defaultwidth=300 $* uuid 2>/dev/null )
+num_returned=$( echo $uuid | grep -o , | wc -l )
+if [ "$uuid" == "" ]; then
+  echo "No UUID returned. Make sure <id> is valid." 1>&2
+  exit 2
+elif [ $num_returned != 0 ]; then
+  echo "More than one UUID returned. This should not happen." 1>&2
+  exit 3
+fi
+echo "Edited note - Task:$* - UUID:$uuid" 
 
-# build full path & file name to store notes in
-folder=`echo $FOLDER | sed "s|^~|$HOME|"`
-file="$folder$uuid$EXT"
+# Build full path & file name to store notes in
+FOLDER=$( echo $FOLDER | sed "s|^~|$HOME|" )
+FOLDER=`dirname $FOLDER`"/"`basename $FOLDER`
+file="$FOLDER/$uuid$EXT"
 
-# determine if notes file already exists
+# Determine if notes file already exists
 fileexists=0
+INITLINE="~~~ Task info: "
+DESCR=$( $TASKBIN $uuid info | egrep "^Description" ) 
+if [ "$DESCR" == "" ]; then DESCR="Description    -"; fi
+# The description may use special chars. Need to escape them!
+DESCR=$( echo "$INITLINE$DESCR" | sed -e 's/[\/&]/\\&/g' )
+PROJ=$( $TASKBIN $uuid info | egrep "^Project" ) 
+if [ "$PROJ" == "" ]; then PROJ="Project       -"; fi
+PROJ="$INITLINE$PROJ"
+TAGS=$( $TASKBIN $uuid info | egrep "^Tags" ) 
+if [ "$TAGS" == "" ]; then TAGS="Tags          -"; fi
+TAGS="$INITLINE$TAGS"
+STR=""
 if [ -f $file ]; then
   fileexists=1
+  # If header is in use, update the task info
+  if [ $USEHEADER == "true" ]; then
+    if sed "1q;d" $file | egrep "^$INITLINE" >/dev/null; then 
+    	sed -i.bak "1s/.*/$DESCR/" $file; 
+    fi
+    if sed "2q;d" $file | egrep "^$INITLINE" >/dev/null; then 
+  	sed -i.bak "2s/.*/$PROJ/" $file; 
+    fi
+    if sed "3q;d" $file | egrep "^$INITLINE" >/dev/null; then
+  	sed -i.bak "3s/.*/$TAGS/" $file
+    fi
+    /bin/rm $file".bak"
+  fi
+  NOTEMSG_OLD=$( egrep "\[tasknote\]" $file | sed 's/ *$//')
+else
+  # If header is in use, modify the template
+  if [ $USEHEADER == "true" ]; then
+    TEMPLATE="$DESCR
+$PROJ
+$TAGS
+$SEPARATOR
+$TEMPLATE"
+  fi
+  NOTEMSG_OLD=$( echo $TEMPLATE | egrep "[tasknote]" )
+  STR="-c 'exe \"normal i$TEMPLATE\"' "
 fi
 
-# Display note if requested and exit
-if [ $# -gt 1 ]; then
-	if [ $fileexists = 1 ]; then
-		$SHELL -c "$VIEWER $file"
-	else
-		echo "File not found"
-	fi
-	exit 1
-fi
+# Create/edit $file with editor
+# Note that use of $STR limit to vi/vim
+#echo "$EDITOR $STR $EDITORPOS"
+$SHELL -c "$EDITOR $STR $EDITORPOS $file"
 
-#create/edit $file with editor
-$SHELL -c "$EDITOR $file"
 
 # Create a note message representing the first line of
 # the edited note file.
 if [ -f $file ]; then
-  NOTEMSG="[tasknote] `head -1 $file`"
-  # remove any previous annotation - we want only a single
-  # tasknote annotation. Detection works through the
-  # [tasknote] annotation prefix
-  $SHELL -c "$TASKBIN $* denotate \"[tasknote]\""
-  $SHELL -c "$TASKBIN $* annotate '$NOTEMSG'"
+	# Get annotation prefix and deblank
+	NOTEMSG=$( egrep "^\[tasknote\]" $file | sed 's/ *$//')
+	# If annotation has been changed
+	if [ "$NOTEMSG_OLD" != "$NOTEMSG" ]; then
+		# remove any previous annotation - we want only a single
+	  	# tasknote annotation. Detection works through the
+	  	# [tasknote] annotation prefix
+		ANNTT=$( $TASKBIN [tasknote] 'uuid')
+		if egrep -q "$uuid" <(echo "$ANNTT"); then 
+  			$SHELL -c "$TASKBIN $* denotate \"[tasknote]\""
+		fi
+		# Add new annotation if not emtpy
+  		if [ "$NOTEMSG" != "" -a "$NOTEMSG" != "[tasknote]" ]; then
+    			$SHELL -c "$TASKBIN $* annotate '$NOTEMSG'"
+  		fi
+	fi
 fi
 
 exit 0
