@@ -8,6 +8,7 @@ History
 * Original implementation: Alan Bowen
 * Update to taskwarrior 2.0: Michael Bobroski
 * Context-aware annotations: Bjoern Doebel
+* Addition of template, header and AlexCzar annotation: Mauro Fiacco
 
 Usage
 -----
